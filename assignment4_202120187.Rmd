@@ -1,0 +1,509 @@
+---
+title: "Assignment 4 (Part 1)"
+author: "202120187"
+date: "10 January 2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# this chunk contains code that sets global options for the entire .Rmd. 
+# we use include=FALSE to suppress it from the top of the document, but it will still appear in the appendix. 
+
+knitr::opts_chunk$set(echo = FALSE) # actually set the global chunk options. 
+# we set echo=FALSE to suppress code such that it by default does not appear throughout the document. 
+# note: this is different from .Rmd default
+```
+
+
+```{r packages, warning=FALSE, message=FALSE}
+
+library(jsonlite)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+
+```
+
+My public Github repository for this assignment can be found at <https://github.com/wwong20/my472-assignment4>.
+
+## Introduction
+
+For this assignment, I chose to analyse Option 1, to find out if there are indeed biases in the individuals chosen by the police to conduct stop and search.
+
+In the United Kingdom, there have been reports by the [BBC](https://www.bbc.co.uk/news/uk-61167875) and [The Guardian](https://www.theguardian.com/uk-news/2022/apr/20/police-watchdog-ethnic-minorities-need-protection-from-unfair-stop-and-search) alleging that Black, Asian, and mixed ethnic people were 2.5 to 7 times more likely to be stopped and searched by the police. The Independent Office for Police Conduct [(IPOC)](https://www.policeconduct.gov.uk/news/iopc-calls-stop-and-search-law-change-and-identifies-18-opportunities-improvement) also made recommendations to the police forces to develop guidelines to safeguard ethnic minorities from experiencing disproportionate use of force during stops and searches due to stereotypical assumptions and biases affecting the policing response.
+
+Thus, I will focus on whether there is a bias in the ethnicity of individuals stopped by police forces for searches.
+
+## Data
+
+From the police’s availability API data, the most complete data (for 41 of the 45 police forces) was available from December 2020 to April 2022. Official statistics by the UK government often end the year in March, and to minimize confounding variables such as seasonality to crime, I analysed the data from April 2021 to March 2022.
+
+```{r api, include=FALSE}
+
+# Obtaining the list of police forces in the UK via API
+api_forces <- fromJSON("https://data.police.uk/api/forces")
+
+```
+
+```{r police forces, echo=FALSE}
+
+# Obtaining the total number of police forces in the UK
+print(nrow(api_forces))
+
+```
+Output 1: The number of police forces in the UK, excluding BTP
+<br>
+
+```{r data availability, include=FALSE}
+
+# Obtaining the list of available data sets via API
+data_availability <- fromJSON("https://data.police.uk/api/crimes-street-dates")
+
+# Reversing the order of the rows into chronological order
+data_availability <- data_availability[rev(1:nrow(data_availability)),]
+
+```
+
+```{r date range, echo=FALSE}
+
+# Show the range of dates where police data is available
+print(head(data_availability$date))
+print(tail(data_availability$date))
+
+```
+Output 2: The outputs above show the head and tail of dates (i.e. start and end) available for the API data.
+<br>
+
+From the police’s availability API data, the most complete data (for 41 of the 45 police forces) was available from December 2020 to April 2022. Official statistics by the UK government often end the year in March, and to minimize confounding variables such as seasonality to crime, I analysed the data from April 2021 to March 2022.
+
+```{r data availability 2, include=FALSE}
+
+# Check if data available for police forces for a particular month is same as the previous month's
+data_availability$is_duplicate <- mapply(identical, data_availability$`stop-and-search`, lag(data_availability$`stop-and-search`))
+rownames(data_availability) <- NULL
+
+# List of all police forces including the BTP
+all_forces <- c(api_forces$id, "btp")
+
+# List of police forces where data is available for April 2021 to March 2022
+data_availability
+available_forces <- data_availability[[2, 2]]
+```
+
+Data for the following police forces were unavailable and thus not included in this analyses:
+
+```{r excluded forces, echo=FALSE}
+
+# List of police forces where data is not available for April 2021 to March 2022
+excluded_forces <- all_forces[!all_forces %in% available_forces]
+excluded_forces
+
+```
+Output 3: Police forces which API data was not available for during the period of April 2021 to March 2022
+<br>
+
+The necessary data sets were obtained via the police API, and only scraped if it doesn’t already exist in the R global environment to reduce load on the servers.
+
+My analysis focused on "officer-defined-ethnicity", as I wanted to focus on the officers' presumption of an individual's ethnicity, and not the individual's perspective of being discriminated against.
+
+To clean the data, all instances where relevant data was blank or 'NA' were excluded from the analyses. 
+
+```{r webscraping, include=FALSE}
+
+web_scraping <- function() {
+  
+  # Assigning the base URL for web scraping
+  base_url <- "https://data.police.uk/api/stops-force?force="
+  
+  # Assigning empty data frame to include web scraping data
+  raw_data <- data.frame()
+  
+  # Looping the function across the 41 police forces
+  for (i in seq_along(available_forces)) {
+    force_urls <- c()
+    
+    # Looping the function over the analysis time period for each police force
+    for (j in 5:16) {
+      
+      # Generating the URL for each police force at each month
+      url <- paste0(base_url, available_forces[i], "&date=", data_availability$date[j])
+      
+      # Adding the URL to a vector
+      force_urls <- c(force_urls, url)
+    }
+    
+    # Assigning a temporary data frame to hold the scraped data
+    temp_data <- data.frame()
+    
+    # Looping the web scraping through all the URLs
+    for (k in force_urls) {
+      scraped_data <- fromJSON(k)
+      
+      # Binding the newly scraped data to previously scraped data
+      temp_data <- bind_rows(temp_data, scraped_data)
+    }
+    
+    # Adding a column identifying the police force it belongs to and merging all the data together
+    temp_data$police_force <- available_forces[i]
+    raw_data <- bind_rows(raw_data, temp_data)
+  }
+  
+  # Saving the data in the R global environment
+  assign("raw_data", raw_data, envir = .GlobalEnv)
+}
+
+
+# Only web scrape when the data doesn't already exist in the global environment
+if (!exists("raw_data")) {
+  web_scraping()
+}
+
+# Only includes cases where ethnicity is defined
+clean_data <- raw_data %>%
+  filter(complete.cases(officer_defined_ethnicity))
+
+```
+
+```{r ethnic plots, include=FALSE}
+
+# Obtain the proportions each ethnicity is stopped by each police force
+ethnic_proportions <- clean_data %>%
+  group_by(police_force) %>%
+  count(officer_defined_ethnicity, name = "count") %>%
+  mutate(proportion = count / sum(count)) %>%
+  ungroup()
+
+# Obtain the unique list of ethnicities as defined by the police
+ethnicities <- unique(clean_data$officer_defined_ethnicity)
+
+# Obtain the proportions each ethnicity is stopped nationally
+mean_values <- table(clean_data$officer_defined_ethnicity)/length(clean_data$officer_defined_ethnicity)
+
+
+# Create a bar chart for each ethnicity
+ethnic_plots <- list()
+
+for (ethnicity in ethnicities) {
+  plot_data <- ethnic_proportions %>%
+    filter(officer_defined_ethnicity == ethnicity)
+  
+  ethnic_prop <- mean_values[ethnicity]
+  
+  # Store the plot in the list
+  ethnic_plots[[ethnicity]] <-
+    ggplot(plot_data, aes(x = police_force, y = proportion, fill = officer_defined_ethnicity)) +
+      geom_bar(stat = "identity", fill = "grey") +
+      geom_hline(yintercept = ethnic_prop, linetype = "dashed", color = "black") +
+      labs(title = paste("Proportion of stops by police force which are of", ethnicity, "ethnicity"),
+           x = "Police Force",
+           y = "Proportion") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+            plot.title.position = "plot",
+            plot.title = element_text(hjust = 0.5))
+}
+
+
+```
+
+For better analysis of the data, data from the [UK 2021 Census](https://www.ethnicity-facts-figures.service.gov.uk/uk-population-by-ethnicity/national-and-regional-populations/population-of-england-and-wales/latest/#data-sources) was used to obtain the proportion of each ethnicity in the UK in 2021:
+
+```{r,echo=FALSE}
+ethnic_census_2021 <- read.csv('./population-by-ethnicity-2001-to-2021.csv')
+print(ethnic_census_2021[1:6,c(3,5,7,8)])
+```
+Output 4: UK 2021 Census ethnic proportions
+
+
+## Analysis
+```{r}
+ethnic_plots[["Asian"]]
+```
+
+Graph 1: Proportion of stops by police force on individuals of Asian ethnicity
+<br>
+
+```{r}
+ethnic_plots[["Black"]]
+```
+
+Graph 2: Proportion of stops by police force on individuals of Black ethnicity
+<br>
+
+```{r}
+ethnic_plots[["Mixed"]]
+```
+
+Graph 3: Proportion of stops by police force on individuals of Mixed ethnicity
+<br>
+
+The low proportion of stops for Mixed ethnicities could be because it is difficult for officers to identify immediately if an individual is so, but might classify them under another or "Other" ethnicity.
+
+```{r}
+ethnic_plots[["White"]]
+```
+
+Graph 4: Proportion of stops by police force on individuals of White ethnicity
+<br>
+
+```{r}
+ethnic_plots[["Other"]]
+```
+
+Graph 5: Proportion of stops by police force on individuals of Other ethnicity
+<br>
+
+
+From the above graphs and Output 4, we can see that:
+
+* Asian: 9.3% of population, 13.08% of stop and searches
+* Black: 4.0% of population, 21.37% of stop and searches
+* Mixed: 2.9% of population, 0.32% of stop and searches
+* White: 81.7% of population, 62.01% of stop and searches
+* Other: 2.1% of population, 3.21% of stop and searches
+
+Minority ethnicities make up only 18.3% of the entire UK population but account for over double (37.99%) the proportion of all stop and searches. Specifically, 21.37% of stop and searches are conducted on Black people when they only make up 4.0% of the population. This highlights that minority ethnicities, especially Black people, are stopped and searched by the police forces disproportionately. 
+
+
+However, there may be arguments that this may be due to the fact that minorities may commit more crimes and thus are more likely to be stop, searched, and arrested. The [UK Government)](https://www.ethnicity-facts-figures.service.gov.uk/crime-justice-and-the-law/policing/number-of-arrests/latest/) hast stated that Black people have the almost double the arrest rate per 1,000 people.
+
+Thus, I further analysed the proportion of the outcomes of these stop and searches to see if they led to a disproportionate proportion of arrests as well, focusing on the police forces where there were abnormally high proportions of stop and searches against Asian, Black, and Other ethnicities.
+
+```{r overall, include=FALSE}
+
+# Obtaining the overall outcome data
+outcome_data <- clean_data %>%
+  filter(!is.na(outcome), outcome != "") %>%
+  count(officer_defined_ethnicity, outcome)
+
+# Obtaining the proportions of the overall outcome data
+outcome_proportions <- outcome_data %>%
+  group_by(officer_defined_ethnicity) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+
+# Plot the proportions of stop and searches by ethnicities where no further action was taken
+overall_noaction <- outcome_proportions %>%
+  filter(outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = officer_defined_ethnicity, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "grey") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+  labs(title = "Proportion of police stop and searches\nwith no further action", x = "Officer Defined Ethnicity", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(limits = c(0, 1))
+  
+# Plot the proportions of stop and searches by ethnicities where futher action was taken
+overall_action <- outcome_proportions %>%
+  filter(!outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = officer_defined_ethnicity, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) +
+  labs(title = "Proportion of police stop and searches\nwith further action", x = "Officer Defined Ethnicity", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5))
+
+  
+```
+
+```{r asian, include=FALSE}
+
+# Obtaining the outcome data for Asians by specific police forces
+asian_data <- clean_data %>%
+  filter(!is.na(outcome), outcome != "",
+         police_force %in% c("bedfordshire", "west-yorkshire", "wiltshire"),
+         officer_defined_ethnicity == "Asian") %>%
+  count(police_force, outcome)
+
+# Obtaining the proportion of outcome data for Asians by specific police forces
+asian_proportions <- asian_data %>%
+  group_by(police_force) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+
+# Plot the proportions of stop and searches for Asians by specific police forces where further action was taken
+asian_action <- asian_proportions %>%
+  filter(!outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = police_force, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) +
+  labs(title = "Proportion of stops by specific police forces on individuals of Asian ethnicity\nwith further action taken", x = "Police Force", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5))
+
+# Plot the proportions of stop and searches for Asians by specific police forces where no further action was taken
+asian_noaction <- asian_proportions %>%
+  filter(outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = police_force, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "grey") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) +
+  labs(title = "Proportion of stops by specific police forces on individuals of Asian ethnicity\nwith no further action taken", x = "Police Force", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r black, include=FALSE}
+
+# Obtaining the outcome data for Black people by specific police forces
+black_data <- clean_data %>%
+  filter(!is.na(outcome), outcome != "",
+         police_force %in% c("bedfordshire", "west-yorkshire", "wiltshire"),
+         officer_defined_ethnicity == "Black") %>%
+  count(police_force, outcome)
+
+# Obtaining the proportion of outcome data for Black people by specific police forces
+black_proportions <- black_data %>%
+  group_by(police_force) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+
+# Plot the proportions of stop and searches for Black people by specific police forces where further action was taken
+black_action <- black_proportions %>%
+  filter(!outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = police_force, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) +
+  labs(title = "Proportion of stops by specific police forces on individuals of Black ethnicity\nwith further action taken", x = "Police Force", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5))
+
+# Plot the proportions of stop and searches for Black people by specific police forces where no further action was taken
+black_noaction <- black_proportions %>%
+  filter(outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = police_force, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "grey") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) +
+  labs(title = "Proportion of stops by specific police forces on individuals of Black ethnicity\nwith no further action taken", x = "Police Force", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r other, include=FALSE}
+
+# Obtaining the outcome data for other ethnicities by specific police forces
+other_data <- clean_data %>%
+  filter(!is.na(outcome), outcome != "",
+         police_force %in% c("city-of-london", "glouscestershire", "kent", "wiltshire"),
+         officer_defined_ethnicity == "Other") %>%
+  count(police_force, outcome)
+
+# Obtaining the proportion of outcome data for other ethnicities by specific police forces
+other_proportions <- other_data %>%
+  group_by(police_force) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+
+# Plot the proportions of stop and searches for other ethnicities by specific police forces where further action was taken
+other_action <- other_proportions %>%
+  filter(!outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = police_force, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) +
+  labs(title = "Proportion of stops by specific police forces on individuals of Other ethnicity\nwith further action taken", x = "Police Force", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5))
+
+# Plot the proportions of stop and searches for other ethnicities by specific police forces where no further action was taken
+other_noaction <- other_proportions %>%
+  filter(outcome %in% c("A no further action disposal")) %>%
+  ggplot(aes(x = police_force, y = proportion, fill = outcome)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "grey") +
+  geom_text(aes(label = round(proportion, 2)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) +
+  labs(title = "Proportion of stops by specific police forces on individuals of Other ethnicity\nwith further action taken", x = "Police Force", y = "Proportion", fill = "Outcome") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title.position = "plot",
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r, echo=FALSE}
+overall_noaction
+```
+
+Graph 6: Proportion of police stop and searches by ethnicity with no further action taken
+<br>
+
+```{r, echo=FALSE}
+overall_action
+```
+
+Graph 7: Proportion of police stop and searches by ethnicity with further action taken
+<br>
+
+From Graph 6, we see that no further action is taken for most stop and searches, and this proportion is similar across all ethnicities.
+
+The proportion of arrests across ethnicities are also mostly similar.
+
+Thus, I further looked into the data of police forces where stop and searches for specific minority groups were abnormally high. 
+
+```{r, echo=FALSE}
+asian_noaction
+```
+
+Graph 8: Proportion of stops by specific police forces on individuals of Asian ethnicity with no further action taken
+<br>
+
+```{r, echo=FALSE}
+asian_action
+```
+
+Graph 9: Proportion of stops by specific police forces on individuals of Asian ethnicity with further action taken
+<br>
+
+```{r, echo=FALSE}
+black_noaction
+```
+
+Graph 10: Proportion of stops by specific police forces on individuals of Black ethnicity with no further action taken
+<br>
+
+```{r, echo=FALSE}
+black_action
+```
+
+Graph 11: Proportion of stops by specific police forces on individuals of Black ethnicity with further action taken
+<br>
+
+```{r, echo=FALSE}
+other_noaction
+```
+
+```{r, echo=FALSE}
+other_action
+```
+
+Graph 13: Proportion of stops by specific police forces on individuals of Other ethnicity with further action taken
+<br>
+
+From Graphs 8, 10, and 12, we can see that in general, the proportions of stop and searches lead to similar proportions of outcomes where there are no further actions taken against the individuals.
+
+In Graphs 9 and 13, we can see that the proportion of arrests also are generally the same, except for other minorities in Wiltshire where the arrests are significantly lower.
+
+In Graph 11, we can see that although the proportions of stops leading to arrests against Black people in West Yorkshire are slightly higher, they are significantly much lower in the other two police jurisdictions.
+<br>
+
+In conclusion, there is definitely a bias against ethnic minorities, especially Black people, with regard to stop and searches. As these stop and searches do not lead to significant increases in the proportion of arrests, the police forces should work on the recommendations of the IPOC to reduce and minimize such biases.
+
+## Code Appendix
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+# this chunk generates the complete code appendix. 
+# eval=FALSE tells R not to run (``evaluate'') the code here (it was already run before).
+```
